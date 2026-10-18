@@ -31,7 +31,7 @@ from clan_join import join_clan_bulk, join_clan_single, fetch_clan_info
 
 # ═══════════════════════════ CONFIG ═══════════════════════════
 WEB_HOST = "0.0.0.0"
-WEB_PORT = int(os.environ.get("PORT", 20333))
+WEB_PORT = 20333
 
 DRIFT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DRIFT")
 ACCOUNTS_FILE = "accounts.json"
@@ -299,6 +299,7 @@ async def _get_total_match_count():
 
 # ═══════════════════════════ PENDING CLAN HELPERS ═══════════════════════════
 def _get_pending_clan(region):
+    """Get pending clan for this region from bot_state.pending_clans."""
     try:
         pending = getattr(bot_state, 'pending_clans', {})
         if not pending:
@@ -318,6 +319,7 @@ def _get_pending_clan(region):
         return entry
     except Exception:
         return None
+
 
 def _mark_pending_clan_joined(region):
     try:
@@ -783,7 +785,7 @@ async def send_getlogin(data, base_url, token, release_version):
             dd = await parse_results(parsed)
         except Exception: pass
         return rp, dd
-    except Exception as e: return None
+    except Exception: return None
 
 
 # ═══════════════════════════ HTTP PING ═══════════════════════════
@@ -1177,7 +1179,7 @@ async def build_movement_packet_2001(key_bytes, msg_key, player_state, x, y, z,
         TAIL = (b"\x00"*7 + b"\x93\xca\xd5\xf9\x0b" + b"\x8e\xfe\xfc\xf7\x0b"
                 + b"\xf4\xe0\xfe\xf7\x03" + b"\x00\x00")
     else:
-        TAIL = (b"\x00"*7 + b"\bd\xb6\xe1\xf3\x03" + b"\x00"
+        TAIL = (b"\x00"*7 + b"\xbd\xb6\xe1\xf3\x03" + b"\x00"
                 + b"\xc4\xb6\xe1\xfb\x0b" + b"\x00\x00")
     body = bytearray()
     body += await uleb_encode(int(account_uid))
@@ -1701,6 +1703,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             if cd: await refresh_account_profile(cd)
         except Exception: pass
 
+    # ═══════════ LEADER: create → invite-loop → ready → start ═══════════
     async def _team_coordinator():
         try:
             deadline = time.time() + TEAM_PEER_WAIT_TIMEOUT
@@ -1716,24 +1719,36 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 is_leader = (_team_state["leader_uid"] == uid_str)
                 peers_snapshot = dict(_team_state["peers"])
 
-            if not is_leader: return
-            if n < TEAM_SIZE: pass
-            else: pass
+            if not is_leader:
+                print_info(f"[TEAM] {uid_str} waiting as member...")
+                return
+            if n < TEAM_SIZE:
+                print_warning(f"[TEAM] Only {n}/{TEAM_SIZE} peers")
+            else:
+                print_success(f"[TEAM] ✅ All {n} peers online")
 
+            # ⭐ NEW: Join pending clan BEFORE matchmaking
             pending_clan = _get_pending_clan(account_region)
             if pending_clan:
                 clan_id = pending_clan['clan_id']
                 clan_region = pending_clan['region']
+                print_success(f"[CLAN] 🏰 Joining clan {clan_id} (region {clan_region})")
                 try:
                     res = await join_clan_bulk(clan_id, clan_region)
                     joined = res.get('success', 0)
                     total = res.get('total', 0)
                     if joined > 0:
+                        print_success(f"[CLAN] ✅ {joined}/{total} accounts joined clan {clan_id}")
                         _mark_pending_clan_joined(clan_region)
                         await asyncio.sleep(3.0)
-                except Exception: pass
+                    else:
+                        print_error(f"[CLAN] ❌ Join failed: {res.get('error', 'unknown')}")
+                except Exception as e:
+                    print_error(f"[CLAN] ❌ {e}")
 
             await asyncio.sleep(TEAM_READY_DELAY)
+            print_success(f"[TEAM] 👑 {uid_str} creating team...")
+
             async with _team_state["lock"]:
                 _team_state["team_code"] = None
                 _team_state["pk_code"] = None
@@ -1748,9 +1763,11 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 pkt = create_team(current_key, current_iv, client_version)
                 if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                     _writer_ref["w"].write(pkt); await _writer_ref["w"].drain()
+                    print_info(f"[TEAM] create_team sent ({len(pkt)}B)")
                     await _team_member_reset(keep_leader=False)
                     await _team_member_join(uid_str)
-            except Exception: pass
+            except Exception as e:
+                print_error(f"[TEAM] create_team: {e}")
 
             await asyncio.sleep(TEAM_CREATE_WAIT)
 
@@ -1762,6 +1779,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 except Exception: pass
                 if not pa: pa = peer_uid
                 peer_uids.append(int(pa))
+            print_info(f"[TEAM] Will invite {len(peer_uids)} peers: {peer_uids}")
 
             heartbeat_stop = asyncio.Event()
             async def heartbeat_loop():
@@ -1775,13 +1793,16 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     except asyncio.TimeoutError: pass
             hb_task = asyncio.create_task(heartbeat_loop())
 
+            print_success(f"[TEAM] 🎯 Invite-loop start (max {int(TEAM_INVITE_MAX_TIME)}s)")
             invite_start = time.time()
             cycle = 0
             while time.time() - invite_start < TEAM_INVITE_MAX_TIME:
                 if not _team_active["flag"]: break
                 if bot_state.is_paused(uid_str): break
                 cnt = await _team_member_count()
-                if cnt >= TEAM_SIZE: break
+                if cnt >= TEAM_SIZE:
+                    print_success(f"[TEAM] 🎉 Full team ({cnt}/{TEAM_SIZE})!")
+                    break
                 cycle += 1
                 for i, tuid in enumerate(peer_uids):
                     async with _team_state["members_lock"]:
@@ -1791,13 +1812,18 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         inv = invite_player_in_team(tuid, current_key, current_iv, region=account_region)
                         if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                             _writer_ref["w"].write(inv); await _writer_ref["w"].drain()
-                    except Exception: pass
+                            print_success(f"[TEAM] 📨 invite {tuid} cycle#{cycle}")
+                    except Exception as e:
+                        print_warning(f"[TEAM] invite err: {e}")
                     await asyncio.sleep(0.5)
                 try: await asyncio.wait_for(heartbeat_stop.wait(), timeout=TEAM_INVITE_CYCLE_WAIT)
                 except asyncio.TimeoutError: pass
 
             final_cnt = await _team_member_count()
+            print_colored(f"[TEAM] ══ FINAL: In team ({final_cnt}/{TEAM_SIZE}) ══", Colors.MAGENTA)
+
             if final_cnt < TEAM_SIZE:
+                print_error(f"[TEAM] Only {final_cnt}/{TEAM_SIZE} joined — abort, retry")
                 heartbeat_stop.set()
                 try: hb_task.cancel(); await hb_task
                 except Exception: pass
@@ -1808,6 +1834,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             try: hb_task.cancel(); await hb_task
             except Exception: pass
 
+            print_success(f"[TEAM] 🚀 {uid_str} loop: ready → 1s → start (every 5s)")
             while _team_active["flag"]:
                 try:
                     if bot_state.is_paused(uid_str): break
@@ -1818,22 +1845,25 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         rdy = ready_for_game(int(oid), current_key, current_iv)
                         if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                             _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
-                    except Exception: pass
+                    except Exception as e: print_warning(f"[TEAM] ready err: {e}")
                     await asyncio.sleep(1.0)
                     sm = start_match_team(int(oid), current_key, current_iv, region=account_region)
                     if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                         _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
-                except Exception: pass
+                except Exception as e: print_warning(f"[TEAM] start err: {e}")
                 try: await asyncio.wait_for(asyncio.sleep(5.0), timeout=5.5)
                 except asyncio.TimeoutError: pass
         except asyncio.CancelledError: raise
-        except Exception: pass
+        except Exception as e:
+            print_error(f"[TEAM] coordinator: {e}")
+            traceback.print_exc()
 
     async def _member_match_trigger():
         try:
             await asyncio.sleep(TEAM_READY_DELAY + TEAM_MEMBER_START_DELAY)
             async with _team_state["lock"]:
                 if _team_state["leader_uid"] == uid_str: return
+            print_success(f"[TEAM] 🚀 Member {uid_str}: ready → 1s → start (every 5s)")
             my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
             while _team_active["flag"]:
                 try:
@@ -1842,15 +1872,15 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         try:
                             rdy = ready_for_game(int(my_id), current_key, current_iv)
                             _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
-                        except Exception: pass
+                        except Exception as e: print_warning(f"[TEAM] member ready err: {e}")
                         await asyncio.sleep(1.0)
                         sm = start_match_team(int(my_id), current_key, current_iv, region=account_region)
                         _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
-                except Exception: pass
+                except Exception as e: print_warning(f"[TEAM] member trigger: {e}")
                 try: await asyncio.wait_for(asyncio.sleep(5.0), timeout=5.5)
                 except asyncio.TimeoutError: pass
         except asyncio.CancelledError: raise
-        except Exception: pass
+        except Exception as e: print_warning(f"[TEAM] member outer: {e}")
 
     try:
         while True:
@@ -1859,11 +1889,10 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             try:
                 if current_account_data:
                     fresh = None
-                    if isinstance(current_account_data, dict):
-                        if current_account_data.get('auth_type') == 'guest' and current_account_data.get('auth_uid'):
-                            fresh = cache_get(str(current_account_data['auth_uid']))
-                        elif current_account_data.get('auth_type') == 'token' and current_account_data.get('auth_token'):
-                            fresh = cache_get(f"tok_{current_account_data['auth_token'][:20]}")
+                    if current_account_data.get('auth_type') == 'guest' and current_account_data.get('auth_uid'):
+                        fresh = cache_get(str(current_account_data['auth_uid']))
+                    elif current_account_data.get('auth_type') == 'token' and current_account_data.get('auth_token'):
+                        fresh = cache_get(f"tok_{current_account_data['auth_token'][:20]}")
                     if fresh:
                         current_account_data = fresh
                         current_key = fresh['aes_ak']; current_iv = fresh['iv_i']
@@ -1871,13 +1900,17 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                             fresh['account_id'], fresh['token'], fresh['server_time'],
                             current_key, current_iv,
                             region=fresh.get('region', account_region), typ='OnLine')
-                    else:
                         try:
-                            if isinstance(current_account_data, dict):
-                                if current_account_data.get('auth_uid'):
-                                    cache_invalidate(str(current_account_data['auth_uid']))
-                                if current_account_data.get('auth_token'):
-                                    cache_invalidate(f"tok_{current_account_data['auth_token'][:20]}")
+                            lv = int(fresh.get('level', current_level) or current_level)
+                            if lv != current_level: current_level = lv
+                        except Exception: pass
+                    else:
+                        print_warning(f"[FUNC] Cache miss {uid_str} -> attempting re-login...")
+                        try:
+                            if current_account_data.get('auth_uid'):
+                                cache_invalidate(str(current_account_data['auth_uid']))
+                            if current_account_data.get('auth_token'):
+                                cache_invalidate(f"tok_{current_account_data['auth_token'][:20]}")
                             new_cred = await bot_state.relogin_account(uid_str, current_account_data)
                             if new_cred:
                                 current_account_data = new_cred
@@ -1888,11 +1921,21 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                     current_key, current_iv,
                                     region=new_cred.get('region', account_region), typ='OnLine'
                                 )
+                                print_success(f"[FUNC] Re-login successful & cache renewed for {uid_str}")
                             else:
-                                raise ConnectionError("Re-login failed")
-                        except Exception:
+                                raise ConnectionError("Re-login returned empty credentials")
+                        except Exception as re_err:
+                            print_error(f"[FUNC] Re-login failed for {uid_str}: {re_err}")
                             await asyncio.sleep(5)
                             raise ConnectionError("Cache expired")
+
+                try:
+                    if uid_str in bot_state.accounts:
+                        ll = int(bot_state.accounts[uid_str].get('level', current_level) or current_level)
+                        if ll != current_level:
+                            print_info(f"[LEVEL] {uid_str}: {current_level} -> {ll}")
+                            current_level = ll
+                except Exception: pass
 
                 rip = await resolve_host_cloudflare(ip)
                 reader, writer = await asyncio.open_connection(rip, int(port))
@@ -1921,6 +1964,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 last_watchdog_check = connection_start_time
                 search_attempts = 0
 
+                # ⭐ Pending clan region override (priority)
                 pending_global = getattr(bot_state, 'pending_clans', {})
                 pending_region = None
                 for reg, entry in pending_global.items():
@@ -1930,13 +1974,16 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
 
                 if pending_region:
                     current_search_region = pending_region
+                    print_success(f"[CLAN] 🎯 Forcing region {current_search_region} for pending clan")
                 elif reconnect_count_total > 0 and (reconnect_count_total % REGION_ROTATE_EVERY_N == 0):
                     region_index = (region_index + 1) % len(REGION_ROTATION_LIST)
                     current_search_region = REGION_ROTATION_LIST[region_index]
+                    print_warning(f"[REGION ROTATE] {uid_str} -> {current_search_region}")
                 else:
                     current_search_region = REGION_ROTATION_LIST[region_index]
 
-                reconnects = 0; no_response_count = 0
+                print_success(f"[FUNC] TCP connected {uid_str} (DNS:{rip} Lvl:{current_level} R:{current_search_region})")
+                reconnects = 0; no_response_count = 0; last_start_time = 0.0
 
                 async with _team_state["lock"]:
                     _team_state["peers"][uid_str] = {
@@ -1944,6 +1991,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         "key": current_key, "iv": current_iv}
                     if _team_state["leader_uid"] is None:
                         _team_state["leader_uid"] = uid_str
+                        print_success(f"[TEAM] 👑 {uid_str} is leader")
 
                 if TEAM_MODE:
                     team_coord_task = asyncio.create_task(_team_coordinator())
@@ -1961,6 +2009,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     if now - last_watchdog_check >= MATCH_WATCHDOG_CHECK:
                         last_watchdog_check = now
                         sd = now - connection_start_time
+                        if sd > 30: print_warning(f"[WATCHDOG] {uid_str} searching {int(sd)}s att={search_attempts}")
                         if sd > MATCH_SEARCH_TIMEOUT:
                             raise ConnectionError("Search watchdog")
                     if search_attempts >= MAX_SEARCH_ATTEMPTS:
@@ -1982,6 +2031,9 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     pl = len(data)
                     no_response_count = 0
 
+                    if DEBUG_TEAM_PACKETS and not hex_data.startswith("0300") and not hex_data.startswith("0600"):
+                        print_info(f"[RAW-IN {uid_str}] len={pl} prefix={hex_data[:24]}")
+
                     if hex_data.startswith("0600") and pl > 20:
                         await _process_social_packet(data, current_account_data, tag="MAIN")
                         continue
@@ -1995,6 +2047,10 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         continue
 
                     if hex_data.startswith("0300") and pl >= 300:
+                        print_colored("=" * 60, Colors.GREEN)
+                        print_colored("MATCH FOUND! Loading...", Colors.GREEN)
+                        print_colored("=" * 60, Colors.GREEN)
+
                         for tk in (team_coord_task, member_trigger_task):
                             if tk and not tk.done():
                                 tk.cancel()
@@ -2026,16 +2082,23 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                     async with _team_state["lock"]:
                                         _team_state["pk_code"] = str(match_code)
                                         _team_state["team_code"] = str(match_code)
+                                    print_colored(f"[PK] 🎯 Room Code: {match_code}", Colors.MAGENTA)
+                                    print_colored(f"[PK] 🌐 Server: {server_ip_port}", Colors.MAGENTA)
+                                    print_colored(f"[PK] 🔑 UDP Key: {udp_key}", Colors.MAGENTA)
                                 except Exception: pass
 
-                                acc_tok = current_account_data.get('access_token', '') if isinstance(current_account_data, dict) else ""
+                                acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
                                 mid, mp = BR_MODE_ID, BR_MAP_ID
+                                tag = "BATTLE_ROYALE"
+                                print_info(f"[TARGET] {tag} mid={mid} mp={mp}")
                                 thunder, sharma = await build_match_startup_packets(
                                     token, udp_key, match_code, effective, block_val or 0,
                                     server_ip=server_ip_port, region=account_region,
                                     client_version=client_version, access_token=acc_tok,
                                     mode_id=mid, map_id=mp)
                                 match_index = await _inc_match(uid_str)
+                                total = await _get_total_match_count()
+                                print_colored(f"[MATCH #{match_index}] UDP -> {server_ip_port} ({tag})", Colors.CYAN)
 
                                 new_match = asyncio.create_task(play_game(
                                     server_ip_port, thunder, sharma, udp_key, match_code,
@@ -2057,7 +2120,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                         except Exception: break
                                 drain_task = asyncio.create_task(drain_gw())
                                 try: await new_match
-                                except Exception: pass
+                                except Exception as e: print_error(f"[MATCH #{match_index}] {e}")
                                 finally:
                                     drain_task.cancel()
                                     try: await drain_task
@@ -2073,18 +2136,21 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                 _team_active["flag"] = True
                                 try: writer.close(); await writer.wait_closed()
                                 except Exception: pass
+                                print_info(f"[FUNC] {uid_str} reconnect in {NEW_MATCH_DELAY}s...")
                                 await asyncio.sleep(NEW_MATCH_DELAY)
                                 reconnect_count_total += 1
                                 break
                             else:
                                 consecutive_parse_failures += 1
+                                print_warning(f"[FUNC] Non-match big pkt #{consecutive_parse_failures}")
                                 if consecutive_parse_failures >= MAX_CONSECUTIVE_PARSE_FAILURES:
                                     consecutive_parse_failures = 0
                                 try: writer.close(); await writer.wait_closed()
                                 except Exception: pass
                                 await asyncio.sleep(NON_MATCH_RECONNECT_DELAY)
                                 break
-                        except Exception:
+                        except Exception as e:
+                            print_error(f"[FUNC] Match parse: {e}")
                             consecutive_parse_failures += 1
                             try: writer.close(); await writer.wait_closed()
                             except Exception: pass
@@ -2094,6 +2160,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     if 30 <= pl <= 40: continue
 
             except asyncio.CancelledError:
+                print_warning(f"[FUNC] Cancelled — cancel {len(play_matches)} UDP")
                 for m in play_matches:
                     if not m.done(): m.cancel()
                 if play_matches:
@@ -2106,12 +2173,16 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         _team_state["leader_uid"] = None
                 await _team_member_leave(uid_str)
                 raise
-            except Exception:
+            except Exception as e:
                 if gateway_ping_task: gateway_ping_task.cancel()
+                print_error(f"[FUNC] TCP state {uid_str}: {e}")
                 play_matches[:] = [m for m in play_matches if not m.done()]
                 if writer:
                     try: writer.close(); await writer.wait_closed()
                     except Exception: pass
+                if "Cache expired" in str(e):
+                    print_warning(f"[FUNC] re-login {uid_str}")
+                    break
                 reconnect_count_total += 1
                 reconnects += 1
                 if reconnects > max_reconnects:
@@ -2228,6 +2299,12 @@ async def refresh_account_profile(ad_or_uid):
         exp = exp if exp is not None else 0
         likes = likes if likes is not None else 0
         acc_id = str(ad['account_id'])
+        old_lv = 0; old_ex = 0
+        try:
+            if acc_id in bot_state.accounts:
+                old_lv = int(bot_state.accounts[acc_id].get('level', 0) or 0)
+                old_ex = int(bot_state.accounts[acc_id].get('exp', 0) or 0)
+        except Exception: pass
         try: bot_state.update_exp(acc_id, exp, level)
         except Exception: pass
         if likes > 0 and acc_id in bot_state.accounts:
@@ -2238,11 +2315,16 @@ async def refresh_account_profile(ad_or_uid):
         ad['level'] = level; ad['exp'] = exp
         if likes > 0: ad['likes'] = likes
         if nick: ad['nickname'] = nick
+        if old_lv > 0 and level > old_lv:
+            print_success(f"[LEVEL UP] {acc_id}: {old_lv} -> {level}")
+        elif old_ex != exp:
+            print_success(f"[EXP] {acc_id} Lvl{level} +{exp - old_ex}")
     except Exception: pass
 
 async def process_account_uid_pass(uid, password):
     cached = cache_get(uid)
     if cached:
+        print_success(f"[CACHE] {uid} loaded")
         acc_id = str(cached['account_id'])
         bot_state.register_account(uid=acc_id,
             nickname=cached.get('nickname', f"Player_{acc_id}"),
@@ -2250,6 +2332,7 @@ async def process_account_uid_pass(uid, password):
             level=cached.get('level', 1), exp=cached.get('exp', 0),
             likes=cached.get('likes', 0))
         _register_credentials(cached); return cached
+    print_info(f"[LOGIN] UID {uid}...")
     try:
         vc = await version_config()
         if not vc: return None
@@ -2273,6 +2356,7 @@ async def process_account_uid_pass(uid, password):
         region = mresp.region or get_proto_field(dd, 3, "ID")
         bot_state.register_account(uid=acc_id, nickname=nick, region=region,
                                     level=level, exp=exp, likes=likes)
+        print_success(f"[OK] {acc_id} | {nick} | Lvl{level} | BATTLE ROYALE")
         ad = {
             'account_id': mresp.account_id, 'nickname': nick, 'region': region,
             'level': level, 'exp': exp, 'likes': likes,
@@ -2286,7 +2370,9 @@ async def process_account_uid_pass(uid, password):
             'auth_type': 'guest', 'auth_uid': uid, 'auth_password': password,
         }
         _register_credentials(ad); cache_set(uid, ad); return ad
-    except Exception: return None
+    except Exception as e:
+        print_error(f"process_account_uid_pass: {e}")
+        traceback.print_exc(); return None
 
 async def process_account_token(access_token):
     cache_key = f"tok_{access_token[:20]}"
@@ -2299,6 +2385,7 @@ async def process_account_token(access_token):
             level=cached.get('level', 1), exp=cached.get('exp', 0),
             likes=cached.get('likes', 0))
         _register_credentials(cached); return cached
+    print_info("[LOGIN] Token...")
     try:
         vc = await version_config()
         if not vc: return None
@@ -2340,7 +2427,8 @@ async def process_account_token(access_token):
             'auth_type': 'token', 'auth_token': access_token,
         }
         _register_credentials(ad); cache_set(cache_key, ad); return ad
-    except Exception: return None
+    except Exception as e:
+        print_error(f"process_account_token: {e}"); return None
 
 async def run_account_worker(ad, label):
     acc_id = str(ad['account_id'])
@@ -2357,6 +2445,7 @@ async def run_account_worker(ad, label):
                                                       ad['aes_ak'], ad['iv_i'], region=reg))
         if ENABLE_HTTP_PING:
             ping_task = asyncio.create_task(ping_worker(acc_id, ad['token'], ad['release_version'], region=reg))
+            print_success(f"[PING] Started {acc_id}")
 
         async def exp_refresher():
             try:
@@ -2374,7 +2463,7 @@ async def run_account_worker(ad, label):
             ad['aes_ak'], ad['iv_i'], account_id=acc_id, account_data=ad,
             account_level=int(ad.get('level', 2) or 2))
     except asyncio.CancelledError: raise
-    except Exception: pass
+    except Exception as e: print_error(f"run_account_worker {label}: {e}")
     finally:
         for t in (info_task, exp_task, ping_task):
             if t and not t.done(): t.cancel()
@@ -2386,13 +2475,26 @@ async def run_account_worker(ad, label):
 async def account_loop_guest(uid, password):
     while True:
         try:
+            print_info(f"[LOGIN] Guest {uid}...")
+            try: bot_state.update_status(str(uid), "CONNECTING")
+            except Exception: pass
             ad = await process_account_uid_pass(uid, password)
             if not ad:
+                print_error(f"Login failed {uid}, retry 15s")
+                try: bot_state.update_status(str(uid), "ERROR")
+                except Exception: pass
                 await asyncio.sleep(15); continue
             await run_account_worker(ad, uid)
+            print_warning(f"Session end {uid}, reconnect 3s")
             await asyncio.sleep(3)
-        except asyncio.CancelledError: break
-        except Exception: await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            print_warning(f"Worker {uid} stopped")
+            try: bot_state.update_status(str(uid), "OFFLINE")
+            except Exception: pass
+            break
+        except Exception as e:
+            print_error(f"Error {uid}: {e}, retry 10s")
+            await asyncio.sleep(10)
 
 async def account_loop_token(token):
     label = token[:10]
@@ -2400,12 +2502,16 @@ async def account_loop_token(token):
         try:
             ad = await process_account_token(token)
             if not ad:
+                print_error("Login token fail, retry 15s")
                 await asyncio.sleep(15); continue
             acc_id = str(ad['account_id'])
             await run_account_worker(ad, acc_id)
             await asyncio.sleep(3)
-        except asyncio.CancelledError: break
-        except Exception: await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            print_warning(f"Token {label} stopped"); break
+        except Exception as e:
+            print_error(f"Token error: {e}, retry 10s")
+            await asyncio.sleep(10)
 
 def load_accounts():
     accounts = []
@@ -2414,7 +2520,7 @@ def load_accounts():
             with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list): accounts = data
-        except Exception: pass
+        except Exception as e: print_error(f"load: {e}")
     if not accounts and FALLBACK_UID and FALLBACK_PASSWORD:
         accounts.append({"uid": FALLBACK_UID, "password": FALLBACK_PASSWORD})
     return accounts
@@ -2430,23 +2536,30 @@ async def main():
     print_info(f"DRIFT folder: {DRIFT_DIR}")
     if TEAM_MODE:
         print_success(f"[SQUAD] size={TEAM_SIZE} peer_wait={TEAM_PEER_WAIT_TIMEOUT}s")
+        print_info(f"  invite_cycle={TEAM_INVITE_CYCLE_WAIT}s | max_time={TEAM_INVITE_MAX_TIME}s")
+        print_info(f"  heartbeat={TEAM_HEARTBEAT_INTERVAL}s | final_wait={TEAM_FINAL_WAIT}s")
     print_colored("=" * 60, Colors.CYAN)
 
     try:
         await start_web_dashboard(host=WEB_HOST, port=WEB_PORT)
         print_success(f"Web server: http://localhost:{WEB_PORT}")
+        print_success(f"  → Landing  : http://localhost:{WEB_PORT}/")
+        print_success(f"  → Login    : http://localhost:{WEB_PORT}/login")
+        print_success(f"  → Signup   : http://localhost:{WEB_PORT}/signup")
+        print_success(f"  → Client   : http://localhost:{WEB_PORT}/client")
+        print_success(f"  → Admin    : http://localhost:{WEB_PORT}/admin")
+        print_success(f"  → Bot Panel: http://localhost:{WEB_PORT}/bot")
     except Exception as e: print_error(f"Web server: {e}")
 
     async def on_account_added(data):
-        if isinstance(data, dict):
-            if data.get("token"):
-                t = str(data["token"]).strip()
-                task = asyncio.create_task(account_loop_token(t))
-                bot_state.account_workers[t[:10]] = task
-            elif data.get("uid") and data.get("password"):
-                u = str(data["uid"]).strip(); p = str(data["password"]).strip()
-                task = asyncio.create_task(account_loop_guest(u, p))
-                bot_state.account_workers[u] = task
+        if "token" in data and data["token"]:
+            t = str(data["token"]).strip()
+            task = asyncio.create_task(account_loop_token(t))
+            bot_state.account_workers[t[:10]] = task
+        elif "uid" in data and "password" in data:
+            u = str(data["uid"]).strip(); p = str(data["password"]).strip()
+            task = asyncio.create_task(account_loop_guest(u, p))
+            bot_state.account_workers[u] = task
 
     async def on_refresh_account(uid):
         await refresh_account_profile(uid)
@@ -2459,16 +2572,14 @@ async def main():
     accounts = load_accounts()
     if not accounts:
         print_warning(f"No accounts in {ACCOUNTS_FILE}. Add via dashboard.")
-    
     for acc in accounts:
-        if isinstance(acc, dict):
-            if acc.get("token"):
-                t = asyncio.create_task(account_loop_token(acc["token"]))
-                bot_state.account_workers[acc["token"][:10]] = t
-            elif acc.get("uid") and acc.get("password"):
-                u = str(acc["uid"])
-                t = asyncio.create_task(account_loop_guest(u, acc["password"]))
-                bot_state.account_workers[u] = t
+        if acc.get("token"):
+            t = asyncio.create_task(account_loop_token(acc["token"]))
+            bot_state.account_workers[acc["token"][:10]] = t
+        elif acc.get("uid") and acc.get("password"):
+            u = str(acc["uid"])
+            t = asyncio.create_task(account_loop_guest(u, acc["password"]))
+            bot_state.account_workers[u] = t
 
     try:
         while True: await asyncio.sleep(1)
