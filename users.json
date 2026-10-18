@@ -1,0 +1,21 @@
+{
+  "dg_drift": {
+    "username": "dg_drift",
+    "display_name": "DG DRIFT",
+    "password_hash": "db6359bee5a0e19153eddf40784ad615$d272c8d9896feec58a03f92f4e3873c148cb1d79a8b31376cdc12c762ce8c1b2",
+    "role": "admin",
+    "basic_credits": 891,
+    "premium_credits": 1,
+    "created_at": 1792312870.429163,
+    "seeded": true
+  },
+  "kingofgames4": {
+    "username": "kingofgames4",
+    "display_name": "KINGOFGAMES4",
+    "password_hash": "68c3f6d6fa8082a41deda7f9cdd850b8$8b9f56a2306d4aa959436ed8611595d7c230be134987033d348524e73e149862",
+    "role": "user",
+    "basic_credits": 106,
+    "premium_credits": 99,
+    "created_at": 1792313014.9350944
+  }
+}
