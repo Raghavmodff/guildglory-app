@@ -31,7 +31,7 @@ from clan_join import join_clan_bulk, join_clan_single, fetch_clan_info
 
 # ═══════════════════════════ CONFIG ═══════════════════════════
 WEB_HOST = "0.0.0.0"
-WEB_PORT = 20333
+WEB_PORT = int(os.environ.get("PORT", 20333))
 
 DRIFT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DRIFT")
 ACCOUNTS_FILE = "accounts.json"
@@ -785,7 +785,7 @@ async def send_getlogin(data, base_url, token, release_version):
             dd = await parse_results(parsed)
         except Exception: pass
         return rp, dd
-    except Exception: return None
+    except Exception as e: return None
 
 
 # ═══════════════════════════ HTTP PING ═══════════════════════════
@@ -1179,7 +1179,7 @@ async def build_movement_packet_2001(key_bytes, msg_key, player_state, x, y, z,
         TAIL = (b"\x00"*7 + b"\x93\xca\xd5\xf9\x0b" + b"\x8e\xfe\xfc\xf7\x0b"
                 + b"\xf4\xe0\xfe\xf7\x03" + b"\x00\x00")
     else:
-        TAIL = (b"\x00"*7 + b"\xbd\xb6\xe1\xf3\x03" + b"\x00"
+        TAIL = (b"\x00"*7 + b"\bd\xb6\xe1\xf3\x03" + b"\x00"
                 + b"\xc4\xb6\xe1\xfb\x0b" + b"\x00\x00")
     body = bytearray()
     body += await uleb_encode(int(account_uid))
